@@ -1,0 +1,18 @@
+From: Sarah (PM)
+Date: 2026-02-21
+
+Hey team, a few things piling up:
+
+1. The mobile checkout flow has a bug where promo codes silently fail on orders over $200.
+   Customers are complaining — Marcus flagged 3 support tickets this week. Needs a fix ASAP.
+
+2. We promised the marketing team a CSV export for the campaign dashboard by end of Q1 (March 31).
+   No one has picked this up yet.
+
+3. Low priority but: the internal admin panel still shows deprecated API warnings on every page load.
+   It's cosmetic but embarrassing when we demo to new hires. Fix when there's bandwidth.
+
+4. Can someone write up a short runbook for the nightly data-sync job? It's failed twice and
+   the on-call engineer had no idea how to restart it. No hard deadline but should happen soon.
+
+Thanks
