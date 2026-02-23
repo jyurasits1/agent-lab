@@ -277,19 +277,33 @@ def triage_file(path: Path) -> tuple[list[dict], list[str], list[str]]:
     return tasks, assumptions, questions
 
 
-def triage_inbox(inbox_dir: Path) -> dict:
+def triage_inbox(inbox_dir: Path) -> tuple[dict, list[dict]]:
+    """
+    Returns (result_dict, file_stats).
+    file_stats is a list of {"file": str, "items_extracted": int, "tasks_produced": int}.
+    """
     txt_files = sorted(inbox_dir.glob("*.txt"))
     if not txt_files:
         logging.warning("No .txt files found in %s", inbox_dir)
-        return {"tasks": [], "assumptions": [], "questions": []}
+        return {"tasks": [], "assumptions": [], "questions": []}, []
 
     all_tasks: list[dict] = []
     all_assumptions: list[str] = []
     all_questions: list[str] = []
+    file_stats: list[dict] = []
 
     for txt_file in txt_files:
         logging.info("Processing %s", txt_file.name)
         tasks, assumptions, questions = triage_file(txt_file)
+        # items_extracted = raw split count before filtering; approximate via summary length
+        raw_items = split_into_items(txt_file.read_text(encoding="utf-8"))
+        file_stats.append(
+            {
+                "file": txt_file.name,
+                "items_extracted": len(raw_items),
+                "tasks_produced": len(tasks),
+            }
+        )
         all_tasks.extend(tasks)
         all_assumptions.extend(assumptions)
         all_questions.extend(questions)
@@ -316,11 +330,131 @@ def triage_inbox(inbox_dir: Path) -> dict:
         len(deduped_questions),
     )
 
-    return {
-        "tasks": all_tasks,
-        "assumptions": deduped_assumptions,
-        "questions": deduped_questions,
-    }
+    return (
+        {
+            "tasks": all_tasks,
+            "assumptions": deduped_assumptions,
+            "questions": deduped_questions,
+        },
+        file_stats,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Report generation
+# ---------------------------------------------------------------------------
+
+REQUIRED_TASK_FIELDS = {"title", "summary", "priority", "due_date", "next_action", "tags"}
+
+
+def generate_report(
+    result: dict,
+    file_stats: list[dict],
+    tasks_path: Path,
+    report_path: Path,
+    ran_at: str,
+) -> str:
+    tasks = result.get("tasks", [])
+
+    # ---- Plan section -------------------------------------------------------
+    plan_lines = [
+        "## Plan\n",
+        "- **Discover** all `.txt` files in `inbox/`, sorted alphabetically.",
+        "- **Parse** each file: strip email-style headers (`From:`, `Date:`, etc.), "
+          "then split into items using numbered-list markers, falling back to paragraph breaks.",
+        "- **Apply heuristics** per item: infer priority from keyword signals, "
+          "extract due dates from prose patterns (ISO, month-day, quarter, relative), "
+          "assign tags from keyword groups, generate a title and summary.",
+        "- **Filter** items that start before the first numbered entry (preamble) "
+          "and items shorter than 20 characters after header stripping.",
+        "- **Merge** tasks, assumptions, and questions across all files; "
+          "deduplicate assumptions and questions.",
+        f"- **Write** `{tasks_path.name}` to `out/` and append a run entry to `logs/latest.log`.",
+        f"- **Write** `{report_path.name}` to `out/` (this file).",
+    ]
+
+    # ---- Execution section --------------------------------------------------
+    exec_lines = ["## Execution\n"]
+    for stat in file_stats:
+        exec_lines.append(
+            f"- `{stat['file']}` — {stat['items_extracted']} raw item(s) extracted, "
+            f"{stat['tasks_produced']} task(s) produced after filtering"
+        )
+    exec_lines.append(f"- **Total tasks**: {len(tasks)}")
+    exec_lines.append(f"- **Assumptions**: {len(result.get('assumptions', []))}")
+    exec_lines.append(f"- **Questions**: {len(result.get('questions', []))}")
+    exec_lines.append(f"- **tasks.json** written to `{tasks_path}`")
+    exec_lines.append(f"- **report.md** written to `{report_path}`")
+    exec_lines.append(f"- Run timestamp: `{ran_at}`")
+
+    # ---- Verification section -----------------------------------------------
+    checks: list[tuple[bool, str]] = []
+
+    # 1. JSON valid — if we got here, it parsed fine; double-check by re-serialising
+    try:
+        json.loads(json.dumps(result))
+        checks.append((True, "JSON serialises and parses without error"))
+    except Exception as exc:
+        checks.append((False, f"JSON validity: {exc}"))
+
+    # 2. Top-level schema keys
+    for key in ("tasks", "assumptions", "questions"):
+        checks.append((key in result, f"Top-level key `{key}` present"))
+
+    # 3. Each task has required fields
+    tasks_missing_fields = [
+        t.get("title", "<no title>")
+        for t in tasks
+        if not REQUIRED_TASK_FIELDS.issubset(t.keys())
+    ]
+    checks.append((
+        not tasks_missing_fields,
+        "All tasks have required fields"
+        + (f" (missing in: {tasks_missing_fields})" if tasks_missing_fields else ""),
+    ))
+
+    # 4. Priority in 1–5
+    bad_priority = [t.get("title", "?") for t in tasks if t.get("priority") not in range(1, 6)]
+    checks.append((
+        not bad_priority,
+        "All task priorities are in range 1–5"
+        + (f" (bad: {bad_priority})" if bad_priority else ""),
+    ))
+
+    # 5. No empty titles
+    empty_titles = [i for i, t in enumerate(tasks) if not t.get("title")]
+    checks.append((
+        not empty_titles,
+        "No tasks have an empty title"
+        + (f" (indices: {empty_titles})" if empty_titles else ""),
+    ))
+
+    verify_lines = ["## Verification\n"]
+    for passed, label in checks:
+        mark = "- [x]" if passed else "- [ ]"
+        verify_lines.append(f"{mark} {label}")
+
+    all_passed = all(p for p, _ in checks)
+    verify_lines.append(
+        f"\n**Overall**: {'all checks passed' if all_passed else 'one or more checks FAILED'}"
+    )
+
+    # ---- Assemble -----------------------------------------------------------
+    header = [
+        f"# inbox_triage report",
+        f"",
+        f"_Generated: {ran_at}_",
+        f"",
+    ]
+    sections = (
+        header
+        + plan_lines
+        + [""]
+        + exec_lines
+        + [""]
+        + verify_lines
+    )
+    return "\n".join(sections) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -350,23 +484,37 @@ def main() -> None:
         action="store_true",
         help="Print the output JSON to stdout without writing any files.",
     )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Also write out/report.md with Plan / Execution / Verification sections.",
+    )
     args = parser.parse_args()
 
     setup_logging(dry_run=args.dry_run)
-    logging.info("inbox_triage starting (dry_run=%s)", args.dry_run)
+    logging.info("inbox_triage starting (dry_run=%s, report=%s)", args.dry_run, args.report)
 
-    result = triage_inbox(INBOX_DIR)
+    ran_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result, file_stats = triage_inbox(INBOX_DIR)
     output_json = json.dumps(result, indent=2, ensure_ascii=False)
+
+    tasks_path = OUT_DIR / "tasks.json"
+    report_path = OUT_DIR / "report.md"
 
     if args.dry_run:
         print(output_json)
         logging.info("Dry run complete — no files written.")
     else:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        tasks_path = OUT_DIR / "tasks.json"
         tasks_path.write_text(output_json, encoding="utf-8")
         logging.info("Wrote %s", tasks_path)
-        print(f"Output written to {tasks_path}")
+        print(f"tasks.json written to {tasks_path}")
+
+        if args.report:
+            report_md = generate_report(result, file_stats, tasks_path, report_path, ran_at)
+            report_path.write_text(report_md, encoding="utf-8")
+            logging.info("Wrote %s", report_path)
+            print(f"report.md  written to {report_path}")
 
 
 if __name__ == "__main__":
