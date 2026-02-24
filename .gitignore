@@ -2,3 +2,5 @@
 logs/latest.log
 agents/**/out/
 .DS_Store
+
+experiments/
