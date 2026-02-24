@@ -475,6 +475,39 @@ def setup_logging(dry_run: bool) -> None:
     )
 
 
+def print_review(result: dict) -> None:
+    """Print a concise human-readable summary of the triage result."""
+    tasks = result.get("tasks", [])
+    print("\n── Tasks ──────────────────────────────────────────────────")
+    for i, t in enumerate(tasks, 1):
+        due = t["due_date"] or "no due date"
+        print(f"  {i}. [P{t['priority']}] {t['title']}")
+        print(f"       due: {due}")
+        print(f"       next: {t['next_action']}")
+    print("\n── Assumptions ─────────────────────────────────────────────")
+    for a in result.get("assumptions", []):
+        print(f"  • {a}")
+    print("\n── Questions ───────────────────────────────────────────────")
+    for q in result.get("questions", []):
+        print(f"  ? {q}")
+    print()
+
+
+def write_outputs(result: dict, file_stats: list[dict], tasks_path: Path,
+                  report_path: Path, ran_at: str, write_report: bool) -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_json = json.dumps(result, indent=2, ensure_ascii=False)
+    tasks_path.write_text(output_json, encoding="utf-8")
+    logging.info("Wrote %s", tasks_path)
+    print(f"tasks.json written to {tasks_path}")
+
+    if write_report:
+        report_md = generate_report(result, file_stats, tasks_path, report_path, ran_at)
+        report_path.write_text(report_md, encoding="utf-8")
+        logging.info("Wrote %s", report_path)
+        print(f"report.md  written to {report_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Triage .txt inbox files into a structured tasks.json."
@@ -489,32 +522,44 @@ def main() -> None:
         action="store_true",
         help="Also write out/report.md with Plan / Execution / Verification sections.",
     )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="Print a concise task summary and prompt before writing any files.",
+    )
     args = parser.parse_args()
 
     setup_logging(dry_run=args.dry_run)
-    logging.info("inbox_triage starting (dry_run=%s, report=%s)", args.dry_run, args.report)
+    logging.info(
+        "inbox_triage starting (dry_run=%s, report=%s, review=%s)",
+        args.dry_run, args.report, args.review,
+    )
 
     ran_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     result, file_stats = triage_inbox(INBOX_DIR)
-    output_json = json.dumps(result, indent=2, ensure_ascii=False)
 
     tasks_path = OUT_DIR / "tasks.json"
     report_path = OUT_DIR / "report.md"
 
     if args.dry_run:
-        print(output_json)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
         logging.info("Dry run complete — no files written.")
-    else:
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        tasks_path.write_text(output_json, encoding="utf-8")
-        logging.info("Wrote %s", tasks_path)
-        print(f"tasks.json written to {tasks_path}")
+        return
 
-        if args.report:
-            report_md = generate_report(result, file_stats, tasks_path, report_path, ran_at)
-            report_path.write_text(report_md, encoding="utf-8")
-            logging.info("Wrote %s", report_path)
-            print(f"report.md  written to {report_path}")
+    if args.review:
+        print_review(result)
+        try:
+            answer = input("Write outputs? (y/N): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer in ("y", "yes"):
+            write_outputs(result, file_stats, tasks_path, report_path, ran_at, args.report)
+        else:
+            logging.info("Review aborted — no files written.")
+            print("Aborted. No files written.")
+        return
+
+    write_outputs(result, file_stats, tasks_path, report_path, ran_at, args.report)
 
 
 if __name__ == "__main__":
